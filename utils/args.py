@@ -1,0 +1,845 @@
+import argparse
+
+import numpy as np
+
+
+def get_args_parser() -> argparse.ArgumentParser:
+       parser = argparse.ArgumentParser('Few-shot learning script', add_help=False)
+
+       # General
+       parser.add_argument('--batch-size', default=1, type=int)
+       parser.add_argument('--num_classes', default=1000, type=int)
+       parser.add_argument('--epochs', default=100, type=int)
+       parser.add_argument(
+              '--fp16',
+              action='store_true',
+              help='Whether to use 16-bit float precision instead of 32-bit',
+       )
+       parser.set_defaults(fp16=True)
+       parser.add_argument(
+              '--output_dir',
+              default='outputs/tmp',
+              help='path where to save, empty for no saving',
+       )
+       parser.add_argument(
+              '--device',
+              default='cuda',
+              help='cuda:gpu_id for single GPU training',
+       )
+       parser.add_argument('--seed', default=0, type=int)
+
+       # Dataset parameters
+       parser.add_argument(
+              '--data-path',
+              default='/datasets01/imagenet_full_size/061417/',
+              type=str,
+              help='dataset path',
+       )
+       parser.add_argument(
+              '--pretrained-checkpoint-path',
+              default='.',
+              type=str,
+              help='path which contains the directories pretrained_ckpts and pretrained_ckpts_converted',
+       )
+       parser.add_argument(
+              '--dataset',
+              choices=['cifar_fs_elite', 'cifar_fs', 'mini_imagenet', 'meta_dataset'],
+              default='cifar_fs',
+              help='Which few-shot dataset.',
+       )
+
+       # Few-shot parameters (Mini-ImageNet & CIFAR-FS)
+       parser.add_argument('--nClsEpisode', default=5, type=int, help='Number of categories in each episode.')
+       parser.add_argument('--nSupport', default=1, type=int, help='Number of samples per category in the support set.')
+       parser.add_argument('--nQuery', default=15, type=int, help='Number of samples per category in the query set.')
+       parser.add_argument('--nValEpisode', default=120, type=int, help='Number of episodes for validation.')
+       parser.add_argument('--nEpisode', default=2000, type=int, help='Number of episodes for training / testing.')
+
+       # MetaDataset parameters
+       parser.add_argument('--image_size', type=int, default=128, help='Images will be resized to this value')
+       parser.add_argument(
+              '--base_sources',
+              nargs='+',
+              default=['aircraft', 'cu_birds', 'dtd', 'fungi', 'ilsvrc_2012', 'omniglot', 'quickdraw', 'vgg_flower'],
+              help='List of datasets to use for training',
+       )
+       parser.add_argument(
+              '--val_sources',
+              nargs='+',
+              default=['aircraft', 'cu_birds', 'dtd', 'fungi', 'ilsvrc_2012', 'omniglot', 'quickdraw', 'vgg_flower'],
+              help='List of datasets to use for validation',
+       )
+       parser.add_argument(
+              '--test_sources',
+              nargs='+',
+              default=['traffic_sign', 'mscoco', 'ilsvrc_2012', 'omniglot', 'aircraft', 'cu_birds', 'dtd', 'quickdraw', 'fungi', 'vgg_flower'],
+              help='List of datasets to use for meta-testing',
+       )
+       parser.add_argument('--shuffle', type=bool, default=True, help='Whether or not to shuffle data for TFRecordDataset')
+       parser.add_argument(
+              '--train_transforms',
+              nargs='+',
+              default=['random_resized_crop', 'jitter', 'random_flip', 'to_tensor', 'normalize'],
+              help='Transforms applied to training data',
+       )
+       parser.add_argument(
+              '--test_transforms',
+              nargs='+',
+              default=['resize', 'center_crop', 'to_tensor', 'normalize'],
+              help='Transforms applied to test data',
+       )
+       parser.add_argument('--num_ways', type=int, default=None, help='Set it if you want a fixed # of ways per task')
+       parser.add_argument('--num_support', type=int, default=None, help='Set it if you want a fixed # of support samples per class')
+       parser.add_argument('--num_query', type=int, default=None, help='Set it if you want a fixed # of query samples per class')
+       parser.add_argument('--min_ways', type=int, default=5, help='Minimum # of ways per task')
+       parser.add_argument('--max_ways_upper_bound', type=int, default=50, help='Maximum # of ways per task')
+       parser.add_argument('--max_num_query', type=int, default=10, help='Maximum # of query samples')
+       parser.add_argument('--max_support_set_size', type=int, default=500, help='Maximum # of support samples')
+       parser.add_argument('--max_support_size_contrib_per_class', type=int, default=100, help='Maximum # of support samples per class')
+       parser.add_argument('--min_examples_in_class', type=int, default=0, help='Classes that have less samples will be skipped')
+       parser.add_argument('--min_log_weight', type=float, default=np.log(0.5), help='Do not touch, used to randomly sample support set')
+       parser.add_argument('--max_log_weight', type=float, default=np.log(2), help='Do not touch, used to randomly sample support set')
+       parser.add_argument(
+              '--ignore_bilevel_ontology',
+              action='store_true',
+              help='Whether or not to use superclass for BiLevel datasets (e.g Omniglot)',
+       )
+       parser.add_argument(
+              '--ignore_dag_ontology',
+              action='store_true',
+              help=(
+                     'Whether to ignore ImageNet DAG ontology when sampling '
+                     'classes from it. This has no effect if ImageNet is not '
+                     'part of the benchmark.'
+              ),
+       )
+       parser.add_argument(
+              '--ignore_hierarchy_probability',
+              type=float,
+              default=0.0,
+              help=(
+                     'if using a hierarchy, this flag makes the sampler '
+                     'ignore the hierarchy for this proportion of episodes '
+                     'and instead sample categories uniformly.'
+              ),
+       )
+
+       # CDFSL parameters
+       parser.add_argument('--test_n_way', default=5, type=int, help='class num to classify for testing (validation)')
+       parser.add_argument('--n_shot', default=5, type=int, help='number of labeled data in each class, same as n_support')
+       parser.add_argument(
+              '--cdfsl_domains',
+              nargs='+',
+              default=['EuroSAT', 'ISIC', 'CropDisease', 'ChestX'],
+              help='CDFSL datasets',
+       )
+       parser.add_argument(
+              '--bscd_iter_num',
+              default=600,
+              type=int,
+              help='Number of episodes for CDFSL/BSCD evaluation (default: 600). Useful for fast hyper-parameter search.',
+       )
+
+       # Model params
+       parser.add_argument('--arch', default='dino_base_patch16_224', type=str, help='Architecture of the backbone.')
+       parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
+       parser.add_argument('--pretrained_weights', default='', type=str, help='Path to pretrained weights to evaluate.')
+       parser.add_argument('--checkpoint_key', default='teacher', type=str, help='Key to use in the checkpoint (example: "teacher")')
+       parser.add_argument('--unused_params', action='store_true')
+       parser.add_argument('--no-pretrain', action='store_true')
+
+       # Deployment params
+       parser.add_argument('--deploy', type=str, default='vanilla', help='Which few-shot model to be deployed for meta-testing.')
+       parser.add_argument('--num_adapters', default=1, type=int, help='Number of adapter tokens')
+       parser.add_argument('--ada_steps', default=40, type=int, help='Number of feature adaptation steps')
+       parser.add_argument('--ada_lr', default=5e-2, type=float, help='Learning rate of feature adaptation')
+       parser.add_argument('--aug_prob', default=0.9, type=float, help='Probability of applying data augmentation during meta-testing')
+       parser.add_argument('--aug_types', nargs='+', default=['color', 'translation'], help='color, offset, offset_h, offset_v, translation, cutout')
+
+       # MiniBLS params
+       parser.add_argument(
+              '--mini_bls_mapping_dim',
+              default=100,
+              type=int,
+              help='MiniBLS random feature mapping dimension (default: 100).',
+       )
+       parser.add_argument(
+              '--mini_bls_reg_lambda',
+              default=1e-3,
+              type=float,
+              help='MiniBLS ridge regularization lambda (default: 1e-3).',
+       )
+       parser.add_argument(
+              '--mini_bls_res_lambda',
+              default=None,
+              type=float,
+              help='MiniBLS residual ridge regularization lambda (default: None -> use mini_bls_reg_lambda).',
+       )
+       parser.add_argument(
+              '--mini_bls_energy_norm',
+              default='true',
+              type=str,
+              help='Enable energy normalization for residual BLS (true/false).',
+       )
+       
+       # Three Stream Enable/Disable switches
+       parser.add_argument(
+              '--mini_bls_s1_enable',
+              action='store_true',
+              help='Enable Stream 1 (Semantic View: original features L2-norm). Default: True, use --mini_bls_s1_disable to turn off.',
+       )
+       parser.add_argument(
+              '--mini_bls_s1_disable',
+              action='store_true',
+              help='Disable Stream 1 (for ablation).',
+       )
+       parser.add_argument(
+              '--mini_bls_s2_enable',
+              action='store_true',
+              help='Enable Stream 2 (Structure View: instance-whitened features). Default: True, use --mini_bls_s2_disable to turn off.',
+       )
+       parser.add_argument(
+              '--mini_bls_s2_disable',
+              action='store_true',
+              help='Disable Stream 2 (for ablation).',
+       )
+       parser.add_argument(
+              '--mini_bls_s3_enable',
+              action='store_true',
+              help='Enable Stream 3 (Energy View: energy-based BLS with random mapping). Default: True, use --mini_bls_s3_disable to turn off.',
+       )
+       parser.add_argument(
+              '--mini_bls_s3_disable',
+              action='store_true',
+              help='Disable Stream 3 (for ablation).',
+       )
+       
+       # 🔥【TTA参数】Test-Time Augmentation
+       parser.add_argument(
+              '--mini_bls_tta_enabled',
+              type=str,
+              default='false',
+              help='Enable Test-Time Augmentation for BLS (improves stability). Default: false.',
+       )
+       parser.add_argument(
+              '--mini_bls_tta_k',
+              type=int,
+              default=5,
+              help='Number of augmentations for TTA. Default: 5.',
+       )
+       parser.add_argument(
+              '--mini_bls_tta_scale',
+              type=float,
+              default=0.1,
+              help='Gaussian noise scale for TTA augmentations. Default: 0.1.',
+       )
+       
+       # Set defaults: all streams enabled by default
+       parser.set_defaults(
+              mini_bls_s1_enable=True,
+              mini_bls_s2_enable=True,
+              mini_bls_s3_enable=True,
+       )
+       parser.add_argument(
+              '--mini_bls_robust_level',
+              default=0,
+              type=int,
+              choices=[0, 1, 2, 3, 4, 5, 6],
+              help='MiniBLS robustification level: 0=vanilla ridge, 1=prototype-cosine weighting, 2=Huber IRLS weighting, 3=fuzzy margin weighting (cdist), 4=fuzzy margin + MCC(IRLS), 5=cosine-margin fuzzy + MCC(IRLS) (normalized), 6=Welsch IRLS on one-hot residual (paper eq: D_ii=exp(-e^2/(2*sigma^2))).',
+       )
+       parser.add_argument(
+              '--mini_bls_irls_iters',
+              default=3,
+              type=int,
+              help='Number of IRLS iterations for robust_level=2/4/5 (default: 3).',
+       )
+       parser.add_argument(
+              '--mini_bls_huber_delta',
+              default=1.0,
+              type=float,
+              help='Huber delta for robust_level=2 (default: 1.0).',
+       )
+
+       parser.add_argument(
+              '--mini_bls_margin_tau',
+              default=0.5,
+              type=float,
+              help='Temperature tau for fuzzy margin weights (robust_level=3/4/5).',
+       )
+       parser.add_argument(
+              '--mini_bls_weight_min',
+              default=0.2,
+              type=float,
+              help='Minimum per-sample weight clamp w_min (robust_level=3/4/5).',
+       )
+       parser.add_argument(
+              '--mini_bls_mcc_sigma',
+              default=0.5,
+              type=float,
+              help='Sigma for MCC correntropy weighting (robust_level=4/5).',
+       )
+       parser.add_argument(
+              '--mini_bls_map_seed_offset',
+              default=777,
+              type=int,
+              help='Seed offset for MiniBLS random mapping init, combined with --seed (default: 777).',
+       )
+
+       # MiniBLS Ablation: Stream switches and Power Transform
+       parser.add_argument(
+              '--mini_bls_stream1_enable',
+              action='store_true',
+              help='Enable Stream 1 (original features) in dual-stream fusion (default: True).',
+       )
+       parser.add_argument(
+              '--mini_bls_stream1_disable',
+              action='store_true',
+              help='Disable Stream 1 for ablation.',
+       )
+       parser.add_argument(
+              '--mini_bls_stream2_enable',
+              action='store_true',
+              help='Enable Stream 2 (power-transform rectified features) in dual-stream fusion (default: True).',
+       )
+       parser.add_argument(
+              '--mini_bls_stream2_disable',
+              action='store_true',
+              help='Disable Stream 2 for ablation.',
+       )
+       parser.add_argument(
+              '--mini_bls_stream3_enable',
+              action='store_true',
+              help='Enable Stream 3 (BLS random mapping) in dual-stream fusion (default: True).',
+       )
+       parser.add_argument(
+              '--mini_bls_stream3_disable',
+              action='store_true',
+              help='Disable Stream 3 for ablation.',
+       )
+       parser.add_argument(
+              '--mini_bls_beta_correction',
+              default=0.5,
+              type=float,
+              help='Power transform exponent for Stream 2 (default: 0.5, range: 0-1).',
+       )
+
+       # NOTE: stream*_enable uses store_true (argparse default False), but our intended default is True.
+       # So we explicitly set defaults here; users can turn streams off via *_disable flags.
+       parser.set_defaults(
+              mini_bls_stream1_enable=True,
+              mini_bls_stream2_enable=True,
+              mini_bls_stream3_enable=True,
+       )
+       parser.add_argument(
+              '--mini_bls_activation',
+              default='relu',
+              type=str,
+              choices=['relu', 'elu', 'tanh', 'fourier'],
+              help='Activation function for BLS Stream 3 (default: relu).',
+       )
+       parser.add_argument(
+              '--mini_bls_scale',
+              default=1.0,
+              type=float,
+              help='Weight scale for BLS Stream 3 to control its contribution (default: 1.0).',
+       )
+
+       # MiniBLS Stream3 upgrades: ORF + Fourier + Noise
+       parser.add_argument(
+              '--mini_bls_bls_w_scale',
+              default=2.0,
+              type=float,
+              help='Scale applied to orthogonal random projection weights before nonlinearity (default: 2.0).',
+       )
+       parser.add_argument(
+              '--mini_bls_bls_noise',
+              default=0.05,
+              type=float,
+              help='Std of Gaussian noise injected into support features for BLS stream; 0 disables (default: 0.05).',
+       )
+
+       parser.add_argument(
+              '--mini_bls_s3_mode',
+              default='concat',
+              type=str,
+              choices=['concat', 'residual'],
+              help='How to use Stream3: concat into features, or residual correction head (default: concat).',
+       )
+       parser.add_argument(
+              '--mini_bls_s3_gamma',
+              default=1.0,
+              type=float,
+              help='Residual head scaling when --mini_bls_s3_mode=residual (default: 1.0).',
+       )
+
+       # MiniBLS ensemble over multiple random feature mappings (prediction-time only)
+       parser.add_argument(
+              '--mini_bls_ensemble',
+              default=1,
+              type=int,
+              help='Number of independent random mappings to ensemble (average logits). 1 disables (default: 1).',
+       )
+       parser.add_argument(
+              '--mini_bls_ensemble_seed_stride',
+              default=1000,
+              type=int,
+              help='Seed stride between ensemble members (default: 1000).',
+       )
+
+       # MiniBLS enhancement node type (random feature nonlinearity)
+       parser.add_argument(
+              '--mini_bls_enhance_type',
+              type=str,
+              default='tanh',
+              choices=['tanh', 'relu', 'sine', 'gaussian', 'multi'],
+              help='Enhancement nonlinearity: tanh (default), relu, sine, gaussian (RBF-like), multi=concat(relu,sine,gaussian).',
+       )
+       parser.add_argument(
+              '--mini_bls_gauss_sigma_mode',
+              type=str,
+              default='adaptive',
+              choices=['adaptive', 'adaptive_shared', 'adaptive_joint', 'fixed'],
+              help=(
+                     'Gaussian enhancement sigma mode: '
+                     'adaptive=per-neuron std from each call\'s support activations (original behavior), '
+                     'adaptive_shared=compute sigma once per episode and reuse for support/query(/virtual), '
+                     'adaptive_joint=compute sigma from support+query activations per episode and reuse, '
+                     'fixed=use --mini_bls_gauss_sigma.'
+              ),
+       )
+       parser.add_argument(
+              '--mini_bls_gauss_sigma',
+              type=float,
+              default=1.0,
+              help='Fixed sigma for gaussian enhancement when --mini_bls_gauss_sigma_mode=fixed (default: 1.0).',
+       )
+       parser.add_argument(
+              '--mini_bls_gauss_sigma_scale',
+              type=float,
+              default=1.0,
+              help='Scale factor for adaptive sigma (default: 1.0).',
+       )
+       parser.add_argument(
+              '--mini_bls_gauss_sigma_eps',
+              type=float,
+              default=1e-3,
+              help='Minimum sigma clamp for gaussian enhancement (default: 1e-3).',
+       )
+
+       # MiniBLS ridge solver backend controls (repro/compat)
+       parser.add_argument(
+              '--mini_bls_solve_device',
+              type=str,
+              default='auto',
+              choices=['auto', 'cpu', 'cuda'],
+              help='Device for the ridge solve (cholesky/solve). auto=use input tensor device (default: auto).',
+       )
+       parser.add_argument(
+              '--mini_bls_solve_dtype',
+              type=str,
+              default='float32',
+              choices=['float32', 'float64'],
+              help='Dtype for the ridge solve when --mini_bls_solve_device forces a move (default: float32).',
+       )
+
+       # Residual Feature Refinement / Residual Classification (optional)
+       parser.add_argument(
+              '--mini_bls_residual_mode',
+              type=str,
+              default='none',
+              choices=['none', 'refine', 'classify_residual'],
+              help=(
+                     'Residual feature logic for MiniBLS: '
+                     'none=disabled (default); '
+                     'refine=refine query features via residual iterations to support prototypes; '
+                     'classify_residual=replace features with residuals and run MiniBLS on residuals.'
+              ),
+       )
+       parser.add_argument(
+              '--mini_bls_residual_base',
+              type=str,
+              default='ridge',
+              choices=['ridge', 'cosine'],
+              help='Base coarse classifier used to compute residual targets: ridge (default) or cosine-to-prototypes.',
+       )
+       parser.add_argument(
+              '--mini_bls_residual_ridge_lambda',
+              type=float,
+              default=1e-2,
+              help='Ridge lambda for residual_base=ridge (episode-wise dual ridge, default: 1e-2).',
+       )
+       parser.add_argument(
+              '--mini_bls_residual_temp',
+              type=float,
+              default=1.0,
+              help='Temperature for base probability computation in residual mode (default: 1.0).',
+       )
+       parser.add_argument(
+              '--mini_bls_residual_alpha',
+              type=float,
+              default=0.5,
+              help='Step size for residual refinement update z <- normalize(z - alpha*(z-proto_hat)) (default: 0.5).',
+       )
+       parser.add_argument(
+              '--mini_bls_residual_iters',
+              type=int,
+              default=1,
+              help='Number of residual refinement iterations when --mini_bls_residual_mode=refine (default: 1).',
+       )
+
+       # Orthogonal random mapping init (W^T W = I)
+       parser.add_argument(
+              '--mini_bls_map_orthogonal',
+              action='store_true',
+              help='Use orthogonal initialization for MiniBLS random mapping weights (W^T W = I).',
+       )
+
+       # Virtual sample synthesis around class centers (inductive)
+       parser.add_argument(
+              '--mini_bls_virtual_samples',
+              type=int,
+              default=0,
+              help='Number of virtual samples per class generated from support covariance (0 disables).',
+       )
+       parser.add_argument(
+              '--mini_bls_virtual_scale',
+              type=float,
+              default=1.0,
+              help='Scale of virtual perturbations (multiplies covariance-based perturbation).',
+       )
+       parser.add_argument(
+              '--mini_bls_virtual_weight',
+              type=float,
+              default=0.5,
+              help='Per-sample weight assigned to virtual samples in weighted ridge (default: 0.5).',
+       )
+
+       # MiniBLS optional SVD denoising (singular value truncation on the weighted support design matrix)
+       parser.add_argument(
+              '--mini_bls_svd_enable',
+              action='store_true',
+              help='Enable SVD singular value truncation before solving ridge on the support set (default: off).',
+       )
+       parser.add_argument(
+              '--mini_bls_svd_drop',
+              default=0.0,
+              type=float,
+              help='Drop ratio of smallest singular values in (0,1). Typical: 0.2~0.3. (default: 0.0).',
+       )
+       parser.add_argument(
+              '--mini_bls_svd_energy',
+              default=0.9,
+              type=float,
+              help='When SVD truncation is enabled, keep the smallest rank k such that cumulative energy sum_{i<=k} s_i^2 / sum s_i^2 >= this value (default: 0.9). Set <=0 to disable energy-based selection and use --mini_bls_svd_drop instead.',
+       )
+       parser.add_argument(
+              '--mini_bls_svd_min_rank',
+              default=1,
+              type=int,
+              help='Minimum rank to keep when SVD truncation is enabled (default: 1).',
+       )
+       # Class-balanced / cost-sensitive weighting for MiniBLS
+       parser.add_argument(
+              '--mini_bls_class_balanced',
+              action='store_true',
+              help='Enable class-balanced sample weighting on the support set (cost-sensitive).',
+       )
+       parser.add_argument(
+              '--mini_bls_cb_mode',
+              type=str,
+              default='inv_sqrt',
+              choices=['inv', 'inv_sqrt'],
+              help='Class-balance mode: "inv" = 1/count, "inv_sqrt" = 1/sqrt(count) (default: inv_sqrt).',
+       )
+
+       # Episode-level graph regularization (Laplacian) for MiniBLS closed-form solver
+       parser.add_argument('--mini_bls_graph_lambda', type=float, default=0.0,
+                           help='Graph Laplacian regularization weight (0 disables)')
+       parser.add_argument('--mini_bls_graph_k', type=int, default=10,
+                           help='K for KNN graph construction (support+query)')
+       parser.add_argument('--mini_bls_graph_sigma', type=float, default=1.0,
+                           help='RBF sigma for KNN graph weights')
+
+       # TCF Adapter (TransT-inspired cross-attention feature filter) for MiniBLS
+       parser.add_argument(
+              '--mini_bls_tcf_enable',
+              action='store_true',
+              help='Enable TCF Adapter: cross-attention between learnable lesion prototypes and ViT patch tokens; outputs K*d vector as MiniBLS input.',
+       )
+       parser.add_argument(
+              '--mini_bls_tcf_k',
+              type=int,
+              default=4,
+              help='Number of latent lesion prototypes K for TCF Adapter (default: 4).',
+       )
+       parser.add_argument(
+              '--mini_bls_tcf_out',
+              type=str,
+              default='flat',
+              choices=['flat', 'mean'],
+              help='TCF output feature form: flat outputs K*d (default, higher-dim); mean outputs d by averaging over K (acts like a soft mask / denoiser).',
+       )
+       parser.add_argument(
+              '--mini_bls_tcf_mode',
+              type=str,
+              default='learnable',
+              choices=['learnable', 'episode_kmeans', 'refine'],
+              help='TCF query prototype mode: learnable=global learnable Q (default), episode_kmeans=initialize Q per-episode by KMeans on support patch tokens (no training), refine=initialize by KMeans then refine Q using a few inner steps on support labels.',
+       )
+
+       parser.add_argument('--mini_bls_tcf_refine_steps', type=int, default=3,
+                           help='Number of inner refinement steps for tcf_mode=refine (default: 3). Set 0 to disable refinement even if mode=refine.')
+       parser.add_argument('--mini_bls_tcf_refine_lr', type=float, default=0.5,
+                           help='Inner-loop learning rate for refining Q (default: 0.5).')
+       parser.add_argument('--mini_bls_tcf_refine_temp', type=float, default=0.05,
+                           help='Temperature for auxiliary cosine-prototype loss during refinement (default: 0.05).')
+       parser.add_argument('--mini_bls_tcf_refine_kmeans_iters', type=int, default=10,
+                           help='KMeans iterations for Q initialization in refine mode (default: 10).')
+       parser.add_argument('--mini_bls_tcf_refine_max_points', type=int, default=1024,
+                           help='Max patch tokens sampled for KMeans init in refine mode (default: 1024).')
+
+       # Multi-Layer Feature Fusion (MLF) for MiniBLS
+       parser.add_argument(
+              '--mini_bls_mlf_enable',
+              action='store_true',
+              help='Enable Multi-Layer Feature Fusion: concat GAP of multiple ViT intermediate layers as MiniBLS input.',
+       )
+       parser.add_argument(
+              '--mini_bls_mlf_layers',
+              type=str,
+              default='-1,-3,-6',
+              help='Comma-separated negative indices of ViT layers to fuse (e.g. "-1,-3,-6").',
+       )
+
+       # Feature orthogonalization (optional)
+       parser.add_argument(
+              '--mini_bls_ortho_enable',
+              action='store_true',
+              help='Enable episode-level feature orthogonalization: remove projection along support mean direction mu (background bias) from Z_support/Z_query.',
+       )
+       parser.add_argument(
+              '--mini_bls_ortho_eps',
+              default=1e-6,
+              type=float,
+              help='Epsilon for orthogonalization stability (default: 1e-6).',
+       )
+
+       parser.add_argument(
+              '--mini_bls_ortho_mode',
+              type=str,
+              default='mu',
+              choices=['mu', 'pca'],
+              help='Orthogonalization mode: "mu" removes projection along support mean direction; "pca" removes projection along top-k PCs of support features (default: mu).',
+       )
+       parser.add_argument(
+              '--mini_bls_ortho_k',
+              type=int,
+              default=1,
+              help='Number of principal components to remove when --mini_bls_ortho_mode=pca (default: 1).',
+       )
+
+       # Second-order statistics (covariance pooling over patch tokens) for MLF (optional)
+       parser.add_argument(
+              '--mini_bls_cov_enable',
+              action='store_true',
+              help='Enable covariance pooling over ViT patch tokens for each fused MLF layer; appends flattened sqrtm covariance features to Z.',
+       )
+       parser.add_argument(
+              '--mini_bls_cov_disable',
+              action='store_true',
+              help='Disable covariance pooling (overrides --mini_bls_cov_enable for ablation studies).',
+       )
+       parser.add_argument(
+              '--mini_bls_cov_proj_dim',
+              default=16,
+              type=int,
+              help='Projection dimension r for covariance pooling (default: 16). Cov feature per layer has r*r dims.',
+       )
+       parser.add_argument(
+              '--mini_bls_cov_power',
+              default=0.5,
+              type=float,
+              help='Matrix power for covariance pooling (default: 0.5 for sqrtm).',
+       )
+       parser.add_argument(
+              '--mini_bls_cov_eps',
+              default=1e-4,
+              type=float,
+              help='Diagonal jitter for covariance SPD stability (default: 1e-4).',
+       )
+       parser.add_argument(
+              '--mini_bls_cov_seed_offset',
+              default=2021,
+              type=int,
+              help='Seed offset for covariance projection init, combined with --seed and mini_bls_map_seed_offset (default: 2021).',
+       )
+
+       # Feature-space non-linear calibration (optional)
+       parser.add_argument(
+              '--mini_bls_power_transform',
+              action='store_true',
+              help='Enable non-linear power transform on MiniBLS input features Z (after initial L2 norm): signed power (default gamma=0.5) then L2 norm.',
+       )
+       parser.add_argument(
+              '--mini_bls_power_gamma',
+              default=0.5,
+              type=float,
+              help='Exponent gamma for the signed power transform (default: 0.5).',
+       )
+       parser.add_argument(
+              '--mini_bls_power_eps',
+              default=1e-6,
+              type=float,
+              help='Epsilon for numerical stability in power transform (default: 1e-6).',
+       )
+
+       parser.add_argument(
+              '--mini_bls_power_mode',
+              default='signed',
+              type=str,
+              choices=['signed', 'relu', 'abs', 'shift'],
+              help='How to handle negative values for power transform: signed (default), relu (clip), abs (magnitude), shift (per-vector shift to non-negative).',
+       )
+
+       # Correlated Fuzzy Mapping (CorF) for MiniBLS (optional)
+       parser.add_argument(
+              '--mini_bls_corf_enable',
+              action='store_true',
+              help='Enable correlated fuzzy mapping: build Z_map by Mahalanobis-distance Gaussian memberships over covariance-whitened subspaces (episode-level init on support set).',
+       )
+       parser.add_argument('--mini_bls_corf_num_subsystems', type=int, default=8,
+                           help='Number of fuzzy subsystems K_f (default: 8).')
+       parser.add_argument('--mini_bls_corf_num_rules', type=int, default=2,
+                           help='Number of rules/clusters per subsystem R (default: 2).')
+       parser.add_argument('--mini_bls_corf_sub_dim', type=int, default=64,
+                           help='Random subspace dimension per subsystem (default: 64).')
+       parser.add_argument('--mini_bls_corf_kmeans_iters', type=int, default=10,
+                           help='KMeans iterations for per-episode CorF init (default: 10).')
+       parser.add_argument('--mini_bls_corf_sigma', type=float, default=1.0,
+                           help='Gaussian membership sigma for CorF (default: 1.0).')
+       parser.add_argument('--mini_bls_corf_cov_eps', type=float, default=1e-4,
+                           help='Diagonal jitter for covariance (default: 1e-4).')
+
+       # Double relaxation (lightweight implementation)
+       parser.add_argument('--mini_bls_label_relax', type=float, default=0.0,
+                           help='Label relaxation strength r>=0 (0 disables). True-class target becomes 1+r, others become -r/(C-1).')
+       parser.add_argument('--mini_bls_graph_relax', type=float, default=0.0,
+                           help='Graph structure relaxation strength (0 disables). Adds r*I to Laplacian: L <- L + r*I.')
+
+       # Transductive self-training (still closed-form ridge; uses query pseudo-labels)
+       parser.add_argument('--mini_bls_self_train_alpha', type=float, default=0.0,
+                           help='Pseudo-label weight scale for query samples (0 disables).')
+       parser.add_argument('--mini_bls_self_train_iters', type=int, default=1,
+                           help='Number of self-training refinement iterations (default: 1).')
+       parser.add_argument('--mini_bls_self_train_temp', type=float, default=1.0,
+                           help='Softmax temperature for pseudo-labels (default: 1.0).')
+       parser.add_argument('--mini_bls_self_train_conf_thr', type=float, default=0.0,
+                           help='Only use query pseudo-labels with max prob >= thr (default: 0.0 uses all).')
+
+       # Other model parameters
+       parser.add_argument('--img-size', default=224, type=int, help='images input size')
+       parser.add_argument('--drop', type=float, default=0.0, metavar='PCT', help='Dropout rate (default: 0.)')
+       parser.add_argument('--drop-path', type=float, default=0.1, metavar='PCT', help='Drop path rate (default: 0.1)')
+       parser.add_argument('--model-ema', action='store_true')
+       parser.add_argument('--no-model-ema', action='store_false', dest='model_ema')
+       parser.set_defaults(model_ema=False)
+       parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
+       parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
+
+       # Optimizer parameters
+       parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER', help='Optimizer (default: "adamw")')
+       parser.add_argument('--opt-eps', default=1e-8, type=float, metavar='EPSILON', help='Optimizer Epsilon (default: 1e-8)')
+       parser.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA', help='Optimizer Betas (default: None, use opt default)')
+       parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM', help='Clip gradient norm (default: None, no clipping)')
+       parser.add_argument('--momentum', type=float, default=0.9, metavar='M', help='SGD momentum (default: 0.9)')
+       parser.add_argument('--weight-decay', type=float, default=0.05, help='weight decay (default: 0.05)')
+
+       # Learning rate schedule parameters
+       parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER', help='LR scheduler (default: "cosine")')
+       parser.add_argument('--lr', type=float, default=5e-5, metavar='LR', help='learning rate (default: 5e-4)')
+       parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct', help='learning rate noise on/off epoch percentages')
+       parser.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT', help='learning rate noise limit percent (default: 0.67)')
+       parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV', help='learning rate noise std-dev (default: 1.0)')
+       parser.add_argument('--warmup-lr', type=float, default=1e-6, metavar='LR', help='warmup learning rate (default: 1e-6)')
+       parser.add_argument('--min-lr', type=float, default=1e-6, metavar='LR', help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+       parser.add_argument('--decay-epochs', type=float, default=30, metavar='N', help='epoch interval to decay LR (step scheduler)')
+       parser.add_argument('--warmup-epochs', type=int, default=5, metavar='N', help='epochs to warmup LR, if scheduler supports')
+       parser.add_argument('--cooldown-epochs', type=int, default=10, metavar='N', help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
+       parser.add_argument('--patience-epochs', type=int, default=10, metavar='N', help='patience epochs for Plateau LR scheduler (default: 10)')
+       parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE', help='LR decay rate (default: 0.1)')
+
+       # Augmentation parameters
+       parser.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT', help='Color jitter factor (default: 0.4)')
+       parser.add_argument(
+              '--aa',
+              type=str,
+              default='rand-m9-mstd0.5-inc1',
+              metavar='NAME',
+              help='Use AutoAugment policy. "v0" or "original". (default: rand-m9-mstd0.5-inc1)',
+       )
+       parser.add_argument('--smoothing', type=float, default=0.0, help='Label smoothing (default: 0.1)')
+       parser.add_argument('--train-interpolation', type=str, default='bicubic', help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
+       parser.add_argument('--repeated-aug', action='store_true')
+
+       # Random Erase params
+       parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT', help='Random erase prob (default: 0.25)')
+       parser.add_argument('--remode', type=str, default='pixel', help='Random erase mode (default: "pixel")')
+       parser.add_argument('--recount', type=int, default=1, help='Random erase count (default: 1)')
+       parser.add_argument('--resplit', action='store_true', default=False, help='Do not random erase first (clean) augmentation split')
+
+       # Mixup params
+       parser.add_argument('--mixup', type=float, default=0.0, help='mixup alpha, mixup enabled if > 0. (default: 0.8)')
+       parser.add_argument('--cutmix', type=float, default=0.0, help='cutmix alpha, cutmix enabled if > 0. (default: 1.0)')
+       parser.add_argument('--cutmix-minmax', type=float, nargs='+', default=None, help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
+       parser.add_argument('--mixup-prob', type=float, default=1.0, help='Probability of performing mixup or cutmix when either/both is enabled')
+       parser.add_argument('--mixup-switch-prob', type=float, default=0.5, help='Probability of switching to cutmix when both mixup and cutmix enabled')
+       parser.add_argument('--mixup-mode', type=str, default='batch', help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+
+       # DRBLS parameters
+       parser.add_argument('--drbls_lam1', default=1.0, type=float, help='DRBLS lambda1')
+       parser.add_argument('--drbls_lam2', default=1.0, type=float, help='DRBLS lambda2')
+       parser.add_argument('--drbls_lam3', default=0.1, type=float, help='DRBLS lambda3')
+       parser.add_argument('--drbls_max_iter', default=10, type=int, help='DRBLS max iterations')
+
+       # DP-BML parameters
+       parser.add_argument('--dpbml_n_z', default=10, type=int, help='Number of feature nodes (groups)')
+       parser.add_argument('--dpbml_n_h', default=10, type=int, help='Number of enhancement nodes (groups)')
+       parser.add_argument('--dpbml_n_feature_map', default=10, type=int, help='Number of features per feature node')
+       parser.add_argument('--dpbml_n_enhance_map', default=10, type=int, help='Number of features per enhancement node')
+       parser.add_argument('--dpbml_lam1', default=1.0, type=float, help='DP-BML lambda1')
+       parser.add_argument('--dpbml_lam2', default=1.0, type=float, help='DP-BML lambda2')
+       parser.add_argument('--dpbml_lam3', default=0.1, type=float, help='DP-BML lambda3')
+       parser.add_argument('--dpbml_max_iter', default=10, type=int, help='DP-BML max iterations')
+
+       # BLS-Online parameters
+       parser.add_argument('--bls_lambda', default=1.0, type=float, help='Ridge lambda for BLS-Online head')
+
+       # BLS parameters (Standard)
+       parser.add_argument('--bls_num_win', default=10, type=int, help='Number of feature mapping windows')
+       parser.add_argument('--bls_num_feat', default=10, type=int, help='Number of features per window')
+       parser.add_argument('--bls_num_enhan', default=100, type=int, help='Number of enhancement nodes')
+       parser.add_argument('--bls_s', default=0.5, type=float, help='Scaling factor for feature nodes')
+       parser.add_argument('--bls_c', default=2**-30, type=float, help='Regularization coefficient for ridge regression')
+
+       # Distillation parameters
+       parser.add_argument('--teacher-model', default='regnety_160', type=str, metavar='MODEL', help='Name of teacher model to train (default: "regnety_160")')
+       parser.add_argument('--teacher-path', type=str, default='')
+       parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help='')
+       parser.add_argument('--distillation-alpha', default=0.5, type=float, help='')
+       parser.add_argument('--distillation-tau', default=1.0, type=float, help='')
+
+       # Misc
+       parser.add_argument('--resume', default='', help='resume from checkpoint')
+       parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
+       parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+       parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
+       parser.add_argument('--num_workers', default=10, type=int)
+       parser.add_argument('--pin-mem', action='store_true', help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
+       parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem', help='')
+       parser.set_defaults(pin_mem=True)
+
+       # distributed training parameters
+       parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
+       parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+       return parser
